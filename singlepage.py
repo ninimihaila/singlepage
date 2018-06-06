@@ -2,47 +2,87 @@
 import base64
 import requests
 import argparse
+import asyncio
 from urllib.parse import urlparse, urljoin
 
+import aiohttp
 from bs4 import BeautifulSoup
+import tqdm
 
 
-def inline(html, tag, src, get_content, replace):
+#====== Async IO =======
+async def aiohttp_get(url):
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as response:
+            return await response.read()
+
+async def fetch_async(url):
+    response = await aiohttp_get(url)
+    return url, response
+
+async def load_urls(urls, cache):
+    tasks = [asyncio.ensure_future(fetch_async(url)) for url in urls]
+    for future in tqdm.tqdm(asyncio.as_completed(tasks), total=len(tasks)):
+        url, response = await future
+        cache[url] = response
+#=======================
+
+def walk_dom(html, tag, attr):
+    """
+    An iterator over the elements that have the given attr
+    """
     for el in html.find_all(tag):
-        url = el.get(src)
-        if url:
-            if not urlparse(url).netloc:
-                # we have a relative path
-                url = urljoin(page, url)
+        if el.has_attr(attr):
+            yield el
 
-            response = requests.get(url)
+def get_url(url, page):
+    if not urlparse(url).netloc:
+        # we have a relative path
+        url = urljoin(page, url)
+    return url
+
+def aggregate_dom_links(html, tags, page):
+    for tag, attr in tags:
+        for el in walk_dom(html, tag, attr):
+            yield get_url(el.get(attr), page)
+
+
+def inline(html, tag, attr, cache, page, get_content, replace):
+    for el in walk_dom(html, tag, attr):
+        url = get_url(el.get(attr), page)
+
+        response = cache.get(url)
+        try:
             content = get_content(response)
+        except Exception as e:
+            print(f'WARNING: {e}')
+            continue
 
-            replace(el, content)
+        replace(el, content)
 
 
-def inline_scripts(html, page):
+def inline_scripts(html, cache, page):
     def replace(el, content):
         el.string = content
         del el['src']
 
-    inline(html, 'script', 'src', lambda r: r.text, replace)
+    inline(html, 'script', 'src', cache, page, lambda r: r.decode(), replace)
 
 
-def inline_style(html, page):
+def inline_style(html, cache, page):
     def replace(el, content):
         el.string = content
         el.name = 'style'
         del el['href']
 
-    inline(html, 'link', 'href', lambda r: r.text, replace)
+    inline(html, 'link', 'href', cache, page, lambda r: r.decode(), replace)
 
 
-def inline_images(html, page):
+def inline_images(html, cache, page):
     def replace(el, content):
         el['src'] = 'data:image/png;base64, ' + base64.b64encode(content).decode('utf-8')
 
-    inline(html, 'img', 'src', lambda r: r.content, replace)
+    inline(html, 'img', 'src', cache, page, lambda r: r, replace)
 
 
 if __name__ == "__main__":
@@ -59,9 +99,24 @@ if __name__ == "__main__":
     html = requests.get(page).text
     soup = BeautifulSoup(html, 'html5lib')
 
-    inline_scripts(soup, page)
-    inline_style(soup, page)
-    inline_images(soup, page)
+    tags = [
+        ('script', 'src'),
+        ('link', 'href'),
+        ('img', 'src'),
+    ]
+
+    # download
+    cache = {}
+
+    print('Downloading resources...')
+    ioloop = asyncio.get_event_loop()
+    ioloop.run_until_complete(load_urls(aggregate_dom_links(soup, tags, page), cache))
+
+    # inline
+    inline_scripts(soup, cache, page)
+    inline_style(soup, cache, page)
+    inline_images(soup, cache, page)
+
 
     with open(out, 'w+') as file:
         file.write(str(soup))

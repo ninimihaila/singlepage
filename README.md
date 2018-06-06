@@ -2,3 +2,4 @@
 
  Current limitations:
  - does not save images from css (to be implemented soon)
+ - does not have exclusion list
