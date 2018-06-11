@@ -3,6 +3,7 @@ import base64
 import requests
 import argparse
 import asyncio
+import imghdr
 from urllib.parse import urlparse, urljoin
 
 import aiohttp
@@ -26,6 +27,14 @@ async def load_urls(urls, cache):
         url, response = await future
         cache[url] = response
 #=======================
+
+def get_image_type(content):
+    """
+    Gets the image type of the file based on the header
+    Returns 'jpeg' if the file is a jpeg, 'png' if it is a png, etc.
+    For a list of all the values, see https://docs.python.org/3/library/imghdr.html
+    """
+    return imghdr.what('', content[:32])
 
 def walk_dom(html, tag, attr):
     """
@@ -80,7 +89,8 @@ def inline_style(html, cache, page):
 
 def inline_images(html, cache, page):
     def replace(el, content):
-        el['src'] = 'data:image/png;base64, ' + base64.b64encode(content).decode('utf-8')
+        image_type = get_image_type(content)
+        el['src'] = f'data:image/{image_type};base64, ' + base64.b64encode(content).decode('utf-8')
 
     inline(html, 'img', 'src', cache, page, lambda r: r, replace)
 
@@ -116,7 +126,6 @@ if __name__ == "__main__":
     inline_scripts(soup, cache, page)
     inline_style(soup, cache, page)
     inline_images(soup, cache, page)
-
 
     with open(out, 'w+') as file:
         file.write(str(soup))
